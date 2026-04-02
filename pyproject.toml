@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyccode"
+version = "0.1.0"
+description = "A minimal Python extraction of Claude Code's core agent loop"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "prompt-toolkit>=3.0",
+    "requests>=2.31",
+]
+
+[project.scripts]
+pyccode = "pyccode.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyccode"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
