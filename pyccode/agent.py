@@ -62,6 +62,23 @@ class AgentLoop:
         turn_id: str,
         event: ModelStreamEvent,
     ) -> None:
+        if event.kind in {"assistant_text_delta", "assistant_delta"}:
+            delta = event.payload.get("delta", event.payload.get("text", ""))
+            payload = dict(event.payload)
+            payload["delta"] = str(delta)
+            self._emit("assistant_delta", turn_id, **payload)
+            return
+
+        if event.kind in {"tool_use", "tool_call", "tool_called"}:
+            payload = dict(event.payload)
+            tool_name = str(payload.get("tool_name", payload.get("name", "")))
+            if tool_name:
+                payload["tool_name"] = tool_name
+            if "call_id" not in payload and "id" in payload:
+                payload["call_id"] = payload["id"]
+            self._emit("tool_called", turn_id, **payload)
+            return
+
         self._emit(event.kind, turn_id, **event.payload)
 
     def _raise_if_interrupt_requested(
@@ -97,66 +114,78 @@ class AgentLoop:
 
         last_assistant_text: str | None = None
         iteration = 0
-        while True:
-            self._raise_if_interrupt_requested(
-                turn_id,
-                iteration,
-                output_text=last_assistant_text,
-            )
-            iteration += 1
-            prompt = self._context_manager.build_prompt(
-                self._history,
-                self._tool_registry.model_visible_specs(),
-                turn_id=turn_id,
-            )
-            self._emit(
-                "model_called",
-                turn_id,
-                iteration=iteration,
-                history_size=len(prompt.messages),
-                tool_count=len(prompt.tools),
-            )
-            response = await self._model_client.complete(
-                prompt,
-                lambda event: self._handle_model_stream_event(turn_id, event),
-            )
-            self._history.append(response.message)
-            self._emit(
-                "model_completed",
-                turn_id,
-                iteration=iteration,
-                stop_reason=response.stop_reason,
-            )
-
-            last_assistant_text = response.message.text_content() or None
-            tool_calls = list(response.message.tool_uses())
-            if not tool_calls:
+        try:
+            while True:
                 self._raise_if_interrupt_requested(
                     turn_id,
                     iteration,
                     output_text=last_assistant_text,
                 )
+                iteration += 1
+                prompt = self._context_manager.build_prompt(
+                    self._history,
+                    self._tool_registry.model_visible_specs(),
+                    turn_id=turn_id,
+                )
                 self._emit(
-                    "turn_completed",
+                    "model_called",
                     turn_id,
                     iteration=iteration,
-                    output_text=last_assistant_text,
+                    history_size=len(prompt.messages),
+                    tool_count=len(prompt.tools),
                 )
-                return TurnResult(
-                    turn_id=turn_id,
-                    output_text=last_assistant_text,
-                    iterations=iteration,
-                    response=response,
-                    history=tuple(self._history),
+                response = await self._model_client.complete(
+                    prompt,
+                    lambda event: self._handle_model_stream_event(turn_id, event),
+                )
+                self._history.append(response.message)
+                self._emit(
+                    "model_completed",
+                    turn_id,
+                    iteration=iteration,
+                    stop_reason=response.stop_reason,
                 )
 
-            result_message = await self._execute_tool_batch(turn_id, tool_calls)
-            self._history.append(result_message)
-            self._raise_if_interrupt_requested(
+                last_assistant_text = response.message.text_content() or None
+                tool_calls = list(response.message.tool_uses())
+                if not tool_calls:
+                    self._raise_if_interrupt_requested(
+                        turn_id,
+                        iteration,
+                        output_text=last_assistant_text,
+                    )
+                    self._emit(
+                        "turn_completed",
+                        turn_id,
+                        iteration=iteration,
+                        output_text=last_assistant_text,
+                    )
+                    return TurnResult(
+                        turn_id=turn_id,
+                        output_text=last_assistant_text,
+                        iterations=iteration,
+                        response=response,
+                        history=tuple(self._history),
+                    )
+
+                result_message = await self._execute_tool_batch(turn_id, tool_calls)
+                self._history.append(result_message)
+                self._raise_if_interrupt_requested(
+                    turn_id,
+                    iteration,
+                    output_text=last_assistant_text,
+                )
+        except TurnInterrupted:
+            raise
+        except Exception as exc:
+            self._emit(
+                "turn_failed",
                 turn_id,
-                iteration,
-                output_text=last_assistant_text,
+                iteration=iteration,
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
+            raise
 
     async def _execute_tool_batch(
         self,
@@ -211,7 +240,9 @@ class AgentLoop:
             "tool_started",
             turn_id,
             tool_name=call.name,
+            call_id=call.id,
             tool_use_id=call.id,
+            call=call,
         )
         result = await self._tool_registry.execute(
             call,
@@ -226,8 +257,11 @@ class AgentLoop:
             "tool_completed",
             turn_id,
             tool_name=call.name,
+            call_id=call.id,
             tool_use_id=call.id,
             is_error=result.is_error,
             content=result.content,
+            call=call,
+            result=result,
         )
         return result

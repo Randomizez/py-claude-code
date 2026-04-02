@@ -34,6 +34,7 @@ class SystemTextBlock:
 class ThinkingBlock:
     text: str
     signature: str | None = None
+    raw_payload: JSONDict | None = None
     type: Literal["thinking"] = "thinking"
 
     def serialize(self) -> JSONDict:
